@@ -1,0 +1,4 @@
+ebin
+*.swp
+.vim.tags
+.rebar
