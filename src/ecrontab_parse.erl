@@ -54,9 +54,10 @@ parse_entrys(CronTab) ->
 
 
 %% parse the single entry
-parse_entry({{M, H, Dom, Mon, Dow}, {Mod, F, A} = MFA}) when is_atom(Mod), is_atom(F), is_list(A) ->
+parse_entry({{M, H, Dom, Mon, Dow}, {Mod, F, A} = MFA} = SrcCron) when is_atom(Mod), is_atom(F), is_list(A) ->
     Cron =
     #cron_entry{
+        src_crontab = SrcCron,
         m = parse_field(M, 0, 59, emin),
         h = parse_field(H, 0, 23, ehour),
         dom = parse_field(Dom, 1, 31, edom),
@@ -71,41 +72,37 @@ parse_entry(_) ->
 
 %% parset the fileld
 parse_field(F, Min, Max, Error) ->
-    try parse_field(F, Min, Max) of
-        Result when is_record(Result,cron_field) -> Result;
-        Reason -> throw({error, {Error,Reason}})
+    try parse_field(F, Min, Max)
     catch _:Reason ->
         throw({error,{Error,Reason}})
     end.
 
+parse_field(Field, Min, Max) ->
+    %% 将整数转换成字符串统一处理
+    FieldList = to_list(Field),
+    FieldList1 = re:replace(FieldList, " ", "", [{return, list}, global]),
+    FieldList2 = re:split(FieldList1, ",", [{return, list}]),
+    do_parse_field(FieldList2, Min, Max, []).
 
-parse_field("*", Min, Max) ->
-    #cron_field{type = ?CRON_RANGE, value = {Min, Max, 1}};
-parse_field(F = [_|_], Min, Max) when is_list(F) ->
-    case catch list_to_integer(F) of
-        V when is_integer(V) -> parse_field(V,Min,Max);
-        _ ->
-            case string:tokens(F, ",") of
-                [Single] -> % is range
-                    case parse_range(Single) of
-                        {First, Last, _Step} = Range when First >= Min, Last =< Max ->
-                            #cron_field{type = ?CRON_RANGE, value = Range}
-                    end;
-                [_|_] = Multi -> % is list
-                    #cron_field{type = ?CRON_LIST, value = lists:map(fun(E) -> parse_field(E, Min, Max) end,Multi)}
-            end
-    end;
-parse_field(F, Min, Max) when F >= Min, F =< Max ->
-    #cron_field{type = ?CRON_NUM, value = F}.
-
-%% parse the range string: "2-5/2", "2-5"
-parse_range(Str) ->
-    {RangeStr, Step} = 
-    case string:tokens(Str, "/") of
-        [Range] ->
-            {Range, 1};
-        [Range, StepStr] ->
-            {Range, list_to_integer(StepStr)}
+do_parse_field([], Min, Max, AccList) ->
+    Fun = fun(Id) -> Min =< Id andalso Id =< Max end,
+    NewAccList = lists:usort(lists:filter(Fun, AccList)),
+    NewAccList;
+do_parse_field(["*"|FieldList], Min, Max, AccList) -> 
+    do_parse_field(FieldList, Min, Max, lists:seq(Min, Max) ++ AccList);
+do_parse_field([Field|FieldList], Min, Max, AccList) ->
+    [First, Last, Inc] =
+    case re:split(Field, "[-/]", [{return, list}]) of
+        [First1] -> [First1, First1, 1];
+        [First1, Last1] -> [First1, Last1, 1];
+        [First1, Last1, Inc1] -> [First1, Last1, Inc1]
     end,
-    [First, Last] = string:tokens(RangeStr, "-"),
-    {list_to_integer(First), list_to_integer(Last), Step}.
+    AddList = lists:seq(to_integer(First), to_integer(Last), to_integer(Inc)),
+    do_parse_field(FieldList, Min, Max, AddList ++ AccList).
+
+to_integer(Int) when is_integer(Int) -> Int;
+to_integer(List) when is_list(List) ->
+    list_to_integer(List).
+
+to_list(Int) when is_integer(Int) -> integer_to_list(Int);
+to_list(List) when is_list(List) -> List.

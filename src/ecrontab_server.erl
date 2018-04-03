@@ -20,7 +20,6 @@
         file = "" :: string(),          % file name
         mtime = 0 :: pos_integer(),     % last modify time
         entrys = [] :: [cron_entry()],  % the cron tasks
-        file_timer :: reference(),      % the check file last modified timer
         cron_timer :: reference()       % the check cron task timer
     }).
 
@@ -44,7 +43,6 @@ init(_Args) ->
                 file = CronFile,
                 mtime = filelib:last_modified(CronFile),
                 entrys = Entrys,
-                file_timer = check_file_timer(),
                 cron_timer = check_cron_timer()
             },
             {ok, State};
@@ -59,36 +57,13 @@ handle_call(_Msg, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({timeout, _Ref, check_file}, State = #state{file = File, mtime = MTime}) ->
-    %?Debug2("check the file :~p", [State]),
-    State2 = State#state{
-        file_timer = check_file_timer()
-    },
-    MTimeNew = filelib:last_modified(File),
-    case  MTimeNew > MTime of
-        true -> % reload crontab
-            case ecrontab_parse:parse(File) of
-                {ok, Entrys} ->
-                    State3 = State2#state{
-                        file = File,
-                        mtime = MTimeNew,
-                        entrys = Entrys
-                    },
-                    {noreply, State3};
-                _Error ->
-                    ?Warn2("the crontab file ~s format error:~p~n", [File, _Error]),
-                    {noreply, State2}
-            end;
-        false ->
-            {noreply, State2}
-    end;
-handle_info({timeout, _Ref, check_cron}, State = #state{entrys = Entrys}) ->
-    %?Debug2("check the cron :~p", [State]),
-    State2 = State#state{
-        file_timer = check_cron_timer()
+handle_info(check_cron, State) ->
+    #state{entrys = Entrys} = State2 = load_crontab(State),
+    State3 = State2#state{
+        cron_timer = check_cron_timer()
     },
     check_entrys(Entrys),
-    {noreply, State2};
+    {noreply, State3};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -103,17 +78,30 @@ code_change(_Old, State, _Extra) ->
 %% internal API
 %%
 %%-----------------------------------------------------------------------------
-
-%% start the check file timer
-check_file_timer() ->
-    {ok,Interval} = application:get_env(check_file_interval),
-    erlang:start_timer(Interval, self(), check_file).
+load_crontab(State = #state{file = File, mtime = MTime}) ->
+    MTimeNew = filelib:last_modified(File),
+    case  MTimeNew > MTime of
+        true -> % reload crontab
+            case ecrontab_parse:parse(File) of
+                {ok, Entrys} ->
+                    ?Debug2("the crontab file ~s load success~n", [File]),
+                    State#state{
+                        file = File,
+                        mtime = MTimeNew,
+                        entrys = Entrys
+                    };
+                _Error ->
+                    ?Warn2("the crontab file ~s format error:~p~n", [File, _Error]),
+                    State
+            end;
+        false ->
+            State
+    end.
 
 %% start the cron tasks timer
 check_cron_timer() ->
-    {ok,Interval} = application:get_env(check_cron_interval),
-    erlang:start_timer(Interval, self(), check_cron).
-
+    {_Date, {_H, _M, S}} = erlang:localtime(), 
+    erlang:send_after((60 - S + 1) * 1000, self(), check_cron).
 
 %% check the cron entrys
 check_entrys(Entrys) ->
@@ -123,10 +111,8 @@ check_entrys(Entrys) ->
         fun(Entry) ->
                 case can_run(Entry, Now, Week) of
                     true ->
-                        %?Debug2("run this task:~p", [Entry]),
                         run_task(Entry#cron_entry.mfa);
                     false ->
-                        %?Debug2("can't run this task:~p", [Entry]),
                         ok
                 end
         end,
@@ -146,28 +132,12 @@ can_run(Entry, {{_, CurMon, CurDay}, {CurH, CurM, _}}, Week) ->
     field_ok(Mon, CurMon). 
 
 %% check if the field is ok
-field_ok(#cron_field{type = ?CRON_NUM, value = Val}, Cur) ->
-    Val =:= Cur;
-field_ok(#cron_field{type = ?CRON_RANGE, value = {First, Last, Step}}, Cur) ->
-    range_ok(Cur, First, Last, Step);
-field_ok(#cron_field{type = ?CRON_LIST, value = List}, Cur) ->
-    lists:any(fun(FInList) -> field_ok(FInList, Cur) end, List).
-
-%% check if the value in the range
-range_ok(Val, First, Last, Step) ->
-    range_ok1(Val, First, Last, Step).
-
-range_ok1(Val, Val, _Last, _Step) ->
-    true;
-range_ok1(_Val, Cur, Last, _Step) when Cur >= Last ->
-    false;
-range_ok1(Val, Cur, Last, Step) ->
-    range_ok1(Val, Cur + Step, Last, Step).
+field_ok(FieldList, Cur) ->
+    lists:member(Cur, FieldList).
 
 
 %% run the task
 run_task({M, F, A} = Task) ->
-    %?Debug2("run the cron task:{~p, ~p, ~p}", [M, F, A]),
     proc_lib:spawn(
         fun() ->
             case catch apply(M, F, A) of
